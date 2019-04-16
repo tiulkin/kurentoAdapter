@@ -1,0 +1,22 @@
+{
+    "presets": [
+        [
+            "@babel/preset-env",
+            {
+                "loose": true,
+                "targets": {
+                    "browsers": [
+                        "last 10 chrome versions",
+                        "last 5 Safari versions",
+                        "last 5 Firefox versions",
+                        "last 3 Edge versions"
+                    ]
+                }
+            }
+        ]
+    ],
+    "plugins": [
+        ["@babel/plugin-proposal-class-properties", { "loose": true }],
+        "@babel/plugin-proposal-optional-chaining"
+    ]
+}
