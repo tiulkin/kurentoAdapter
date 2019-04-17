@@ -438,9 +438,7 @@ class KurentoAdapter {
             iceCompleteTimeout: 10000,
             offerOptions: {
                 offerToReceiveAudio: true,
-                offerToReceiveVideo: true,
-                offerToSendAudio: false,
-                offerToSendVideo: false
+                offerToReceiveVideo: true
             },
             config: { iceServers: this.iceServers }
         });
