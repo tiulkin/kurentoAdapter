@@ -375,7 +375,7 @@ class KurentoAdapter {
                 offerToReceiveAudio: false,
                 offerToReceiveVideo: false,
                 offerToSendAudio: true,
-                offerToSendVideo: !this.audioOnly
+                offerToSendVideo: true
             }
         });
         // ниже костыль, выпиливающий _onChannelClose , который зачем-то уничножает весь пир апри закрытии канала данных
