@@ -22,6 +22,7 @@
     "@babel/plugin-proposal-optional-chaining": "^7.2.0",
     "babel-register": "^6.26.0",
     "clean-webpack-plugin": "^2.0.1",
+    "event": "^1.0.0",
     "getusermedia": "^2.0.1",
     "inline-source-map": "^0.6.2",
     "kurento-jsonrpc": "https://github.com/tiulkin/kurento-jsonrpc-js.git",

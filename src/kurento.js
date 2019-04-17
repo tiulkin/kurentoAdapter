@@ -1,5 +1,5 @@
 import Peer from 'simple-peer';
-import RpcBuilder from 'kurento-jsonrpc';
+import RPCBuilder from 'kurento-jsonrpc';
 import getUserMedia from 'getUserMedia';
 import kurentoEventsList from './eventsList'
 // to prevent hardcode any paticular event libriary we jast leave it up to caller
@@ -17,7 +17,7 @@ const defaultConstraints = {
         }
     }
 };
-const tryingTimeToError = 7000;
+const tryingTimeToError = 3000;
 const defaultIceServers = [
     {
         "urls": ["turn:84.201.132.40:3478"],
@@ -33,14 +33,15 @@ const defaultIceServers = [
 class KurentoAdapter {
     constructor(config) {
         this.eventEmitter = config.eventEmitter || { emit: (event => console.log(event)) };
+        this.logEventName = config.logEventName;
 
         this.roomServerUrl = config.roomServerUrl;
 
         this.localVideoParentElement = config.localVideoParentElement;
         this.remoteVideoParentElement = config.remoteVideoParentElement;
 
-        this.remoteStreamOptions = null;
         this.localStream = null;
+        this.remoteStream = null;
 
         this.peerConnections = {};
 
@@ -54,76 +55,94 @@ class KurentoAdapter {
 
         this.audioOnly = false;
 
+        this.localVideoDisabled = config.localVideoDisabled;
+        this.localAudioDisabled = config.localAudioDisabled;
+        this.remoteVideoDisabled = config.remoteVideoDisabled;
+        this.remoteAudioDisabled = config.remoteAudioDisabled;
+
         this.roomConnected = false;
+        this.remoteUserInRoom = false;
+
         this.localPublished = false;
+        this.isClosing = false;
         this.remotePlaying = false;
 
         this.reconnectRoomTime = 0;
-        this.reconnectPublishTime = 0;
-        this.reconnectReceiveTime = 0;
-
+        this.reconnectRoomTime = 0;
         this.reconnectInterval = null;
 
         this.start();
         // the first attempt for audio and video
 
     }
+    log = data => {
+        if (this.logEventName) this.emit(this.logEventName, data);
+    };
+
+    emit = (event, data) => {
+        console.log(event, data);
+        this.eventEmitter.emit(event, { data, context:this.getRoomInfo() });
+    };
+
     start = () => {
+        this.log('startingProcess');
+        if (this.jsonRPCClient) {
+            try {
+                this.log('closingExistedJsonRPCClient');
+                this.jsonRPCClient.close();
+            } catch (error) {
+                this.log('errorClosingExistedJsonRPCClient', error, true);
+            }
+        }
         if (this.peerConnections[this.userId]) {
+            this.log('destroingExistedPeerConnectionLocal');
+            this.localStream = null;
             this.peerConnections[this.userId].destroy();
         }
         if (this.peerConnections[this.remoteUserId]) {
+            this.log('destroingExistedPeerConnectionRemote');
+            this.remoteStream = null;
             this.peerConnections[this.remoteUserId].destroy();
         }
+        this.showRemoteVideo(true);
+        this.showLocalVideo(true);
         getUserMedia(this.rtcConstrains, (err, stream) => {
+            this.log('getUserMediaWithVideo');
             if (err) {
                 // the second attempt for audio only
                 this.rtcConstrains.video = false;
+                this.log('getUserMediaWithVideoError');
                 getUserMedia(this.rtcConstrains, (err, stream) => {
+                    this.log('getUserMediaWithoutVideo');
                     if (err) {
-                        this.eventEmitter.emit(kurentoEventsList.access.denied, this.getRoomInfo());
+                        this.log('getUserMediaWithoutVideoError', err, true);
                     } else{
                         this.audioOnly = true;
+                        this.log('gotUserMediaWithoutVideo');
                         this.initConnection(stream);
                     }
                 })
             } else {
+                this.log('gotUserMediaWithoutVideo');
                 this.initConnection(stream);
             }
         });
     }
 
     initConnection = stream => {
-        this.eventEmitter.emit(kurentoEventsList.access.granted, this.getRoomInfo());
         this.localStream =  stream;
+        this.log('gotLocalStream');
         try {
-            this.initJsonRpcClient();
+            this.log('initJsonRPCClient');
+            this.initJsonRPCClient();
         } catch (error) {
-            this.eventEmitter.emit(kurentoEventsList.access.granted, this.getRoomInfo());
-            return {
-                error: error
-            };
+            this.log('initJsonRPCClientError', error, true);
         }
-        // setTimeout(() => this.reconnectInterval = setInterval(this.reconnectDeamon, 5000), 10000);
+        clearInterval(this.reconnectInterval);
+        setTimeout(() => this.reconnectInterval = setInterval(this.reconnectDeamon, 5000), 2000);
     }
 
-    reconnectDeamon = () => {
-        if (!this.roomConnected){
-            if (this.reconnectRoomTime + tryingTimeToError < new Date().getTime()){
-                this.start();
-            }
-        } else if (!this.localPublished){
-            if (this.reconnectPublishTime + tryingTimeToError < new Date().getTime()){
-                this.start();
-            }
-        } else if (!this.remotePlaying){
-            if (this.reconnectReceiveTime + tryingTimeToError < new Date().getTime()){
-                this.receiveRemoteVideo(this.remoteUserIdKurento);
-            }
-        }
-    }
-
-    initJsonRpcClient = () => {
+    initJsonRPCClient = () => {
         const config = {
             heartbeat: 2000,
             sendCloseMessage: false,
@@ -132,26 +151,56 @@ class KurentoAdapter {
                 useSockJS: false,
                 onconnected: this.onSocketConnected,
                 ondisconnect: this.onSocketDisconnected,
-                // onreconnecting: this.onSocketReconnecting,
-                // onreconnected: this.onSocketReconnected,
+                onreconnecting: this.onSocketDisconnected,
                 onerror: this.onSocketError
             },
             rpc: {
-                requestTimeout: 15000,
-                participantJoined: this.onSocketDisconnected,
+                requestTimeout: 2000,
                 participantPublished: this.onRemotePublished,
-                participantUnpublished: this.onSocketDisconnected,
-                participantLeft: this.onSocketDisconnected,
-                participantEvicted: this.onSocketDisconnected,
-                iceCandidate: this.onIceCandidateReceived ,
-                mediaError: this.onSocketDisconnected,
-                sendMessage: this.onSocketDisconnected,
+                participantLeft: this.onParticipantLeft,
+                participantEvicted: this.onParticipantEvicted,
+                participantJoined: this.onParticipantJoined,
+                iceCandidate: this.onIceCandidateReceived,
+                mediaError: this.onSocketDisconnected
+                // sendMessage: this.onSocketDisconnected,
             }
         };
-        this.jsonRpcClient =  new RpcBuilder.clients.JsonRpcClient(config);
+        this.jsonRPCClient =  new RPCBuilder.clients.JsonRpcClient(config);
     }
 
-    showLocalVideo = () => {
+    connect = () => {
+        this.log('joiningToRoom');
+        try {
+            this.sendRequest('joinRoom', {user: this.userId, room: this.roomId}, this.onRoomConnected)
+        } catch (e) {
+            this.log('errorJoiningToRoom', e, true);
+            setTimeout(this.connect, 1000);
+        }
+    };
+
+    reconnectDeamon = () => {
+        if (this.isClosing) {
+            clearInterval(this.reconnectInterval);
+        } else if ((!this.roomConnected || !this.localPublished || (this.remoteUserInRoom && (!this.remotePlaying ))) &&
+            this.reconnectRoomTime + tryingTimeToError < new Date().getTime()) {
+                    this.log('resetRoomConnection', {
+                        roomConnected: this.roomConnected,
+                        localPublished: this.localPublished,
+                        remotePlaying: this.remotePlaying
+                    });
+                    this.reconnectRoomTime = new Date().getTime();
+                    this.start();
+                }
+    };
+
+    closeLocalConnection = () => {
+        this.log('closeLocalConnection');
+        this.isClosing = true;
+        this.peerConnections[this.userId].destroy();
+        this.peerConnections=null;
+
+    }
+    showLocalVideo = destroyOnly => {
         const parentElement = typeof this.localVideoParentElement === 'string'
             ? document.getElementById(this.localVideoParentElement)
             : this.localVideoParentElement;
@@ -163,6 +212,8 @@ class KurentoAdapter {
                 parentElement.removeChild(videoElement);
             }
 
+            if(destroyOnly) return;
+
             videoElement = document.createElement('video');
             videoElement.autoplay = true;
             videoElement.controls = false;
@@ -172,21 +223,23 @@ class KurentoAdapter {
             videoElement.srcObject = this.localStream;
 
             parentElement.appendChild(videoElement);
-
+            this.log('createdVideoElementLocal');
         }
     };
 
-    showRemoteVideo = stream => {
+    showRemoteVideo = detsroyOnly => {
         const parentElement = typeof this.remoteVideoParentElement === 'string'
             ? document.getElementById(this.remoteVideoParentElement)
             : this.remoteVideoParentElement;
 
-        if (stream && parentElement) {
+        if (this.remoteStream && parentElement) {
             let audioElement = parentElement.getElementsByTagName('audio')[0];
             let videoElement = parentElement.getElementsByTagName('video')[0];
 
             if (audioElement) parentElement.removeChild(audioElement);
             if (videoElement) parentElement.removeChild(videoElement);
+
+            if (detsroyOnly) return;
 
             videoElement = document.createElement('video');
             videoElement.autoplay = true;
@@ -198,52 +251,80 @@ class KurentoAdapter {
             videoElement.onplay = () => {
                 audioElement.srcObject = null;
                 this.remotePlaying = true;
-                this.eventEmitter.emit(kurentoEventsList.localVideo.playing, this.getRoomInfo());
+                this.log('remoteVideoStarted');
             };
             videoElement.onerror = () => {
+                this.log('remoteVideoError');
                 this.remotePlaying = false;
-                this.eventEmitter.emit(kurentoEventsList.localVideo.error, this.getRoomInfo());
             };
             audioElement.onplay = () => {
+                this.log('remoteAudioStarted');
                 audioElement.srcObject = null;
                 this.remotePlaying = true;
-                this.eventEmitter.emit(kurentoEventsList.localVideo.playing, this.getRoomInfo());
             };
             audioElement.onerror = () => {
                 this.remotePlaying = false;
-                this.eventEmitter.emit(kurentoEventsList.localVideo.error, this.getRoomInfo());
+                this.log('remoteAudioError');
             };
-
-            audioElement.srcObject = stream;
-            videoElement.srcObject = stream;
+            audioElement.srcObject = this.remoteStream;
+            videoElement.srcObject = this.remoteStream;
 
             parentElement.appendChild(videoElement);
             parentElement.appendChild(audioElement);
+
+            this.setRemoteVideoDisabled(this.remoteVideoDisabled);
+            this.setRemoteAudioDisabled(this.remoteAudioDisabled);
         }
     };
+
+    setLocalVideoDisabled = value => {
+        this.localStream?.getVideoTracks().forEach(track => {
+            this.log(value ? 'disabledLocalVideo' : 'enabledLocalVideo');
+            track.enabled = !value;
+        });
+    }
+
+    setLocalAudioDisabled = value => {
+        this.localStream?.getAudioTracks().forEach(track => {
+            this.log(value ? 'disabledLocalAudio' : 'enabledLocalAudio');
+            track.enabled = !value;
+        });
+    }
+
+    setRemoteVideoDisabled = value => {
+        this.remoteStream?.getVideoTracks().forEach(track =>{
+            this.log(value ? 'disabledRemoteVideo' : 'enabledRemoteVideo');
+            track.enabled = !value;
+        });
+    }
+
+    setRemoteAudioDisabled = value => {
+        this.remoteStream?.getAudioTracks().forEach(track => {
+            this.log(value ? 'disabledRemoteAudio' : 'enabledRemoteAudio');
+            track.enabled = !value;
+        });
+    }
 
     processRemoteUsers = users => {
         const members = users || [];
         let remoteUserId = null;
 
         members.forEach (member => {
-            if ((member.id||'').includes(this.remoteUserId) && member.streams.length)
+            if ((member.id||'').includes(this.remoteUserId) && member.streams?.length)
                 remoteUserId = `${member.id}_${member.streams[member.streams.length-1].id}`;
         });
-        this.eventEmitter.emit(kurentoEventsList.room.connected, this.getRoomInfo());
-        this.eventEmitter.emit(kurentoEventsList.log.record, this.getRoomInfo());
 
         if (remoteUserId){
             this.remoteUserIdKurento = remoteUserId;
             this.receiveRemoteVideo(remoteUserId);
         }
-    }
+    };
 
     onLocalVideoOfferSent = (error, response) => {
         if(error) {
-            this.eventEmitter.emit(kurentoEventsList.signaling.offerError, this.getRoomInfo());
+            this.log('errorSendingPublishVideo', {error, response}, true);
         } else {
-            this.eventEmitter.emit(kurentoEventsList.signaling.offerSent, this.getRoomInfo());
+            this.log('gotLocalOfferAnswer', response);
             this.peerConnections[this.userId].signal({
                 type: 'answer',
                 sdp: response.sdpAnswer
@@ -254,9 +335,9 @@ class KurentoAdapter {
 
     onRemoteVideoOfferSent = (remoteUserId, error, response) => {
         if(error) {
-            this.eventEmitter.emit(kurentoEventsList.signaling.offerError, this.getRoomInfo());
+            this.log('errorRemoteOfferSent', {remoteUserId, error, response}, true);
         } else {
-            this.eventEmitter.emit(kurentoEventsList.signaling.offerSent, this.getRoomInfo());
+            this.log('gotRemoteOfferAnswer', response);
             this.peerConnections[this.remoteUserId].signal({
                 type: 'answer',
                 sdp: response.sdpAnswer
@@ -265,23 +346,20 @@ class KurentoAdapter {
         }
     };
 
-    onLocalVideoCandidateSent = (error, response) => {
+    onLocalVideoCandidateSent = (remoteUserId, error, response) => {
         if(error) {
-            this.eventEmitter.emit(kurentoEventsList.signaling.localCandidateSendError, this.getRoomInfo());
-        } else {
-            this.eventEmitter.emit(kurentoEventsList.signaling.localCandidateSent, this.getRoomInfo());
+            this.log('errorSendingLocalIceCandidate', {remoteUserId, error, response}, true);
         }
     };
 
     onRemoteVideoCandidateSent = (remoteUserId, error, response) => {
         if(error) {
-            this.eventEmitter.emit(kurentoEventsList.signaling.localCandidateSendError, this.getRoomInfo());
-        } else {
-            this.eventEmitter.emit(kurentoEventsList.signaling.localCandidateSent, this.getRoomInfo());
+            this.log('errorSendingRemoteIceCandidate', {remoteUserId, error, response}, true);
         }
     };
 
     publishLocalVideo = () => {
+        this.log('createPeerConnectionLocal');
         this.peerConnections[this.userId] = new Peer({
             initiator: true,
             trickle: true,
@@ -297,29 +375,31 @@ class KurentoAdapter {
         // ниже костыль, выпиливающий _onChannelClose , который зачем-то уничножает весь пир апри закрытии канала данных
         this.peerConnections[this.userId]._onChannelClose = () => null;
         // ---------------------------------------------------------------------
-        this.peerConnections[this.userId].on('error', function (err) {
-            console.log('error', err)
+        this.peerConnections[this.userId].on('error', err => {
+            this.log('errorPeerConnectionLocal', err);
         });
 
         this.peerConnections[this.userId].on('signal', data => {
             if (data?.type === 'offer') {
+                this.log('sendPublishVideo');
                 this.sendRequest('publishVideo', {
                     sdpOffer: data.sdp,
                     doLoopback: false
                 }, this.onLocalVideoOfferSent);
-                this.eventEmitter.emit(kurentoEventsList.signaling.offerSending, this.getRoomInfo());
             }
             if (data?.candidate) {
                 const dataToSend = {...data.candidate};
                 dataToSend.endpointName = this.userId;
+                this.log('sendOnIceCandidateLocal');
                 this.sendRequest('onIceCandidate', dataToSend, this.onLocalVideoCandidateSent);
-                this.eventEmitter.emit(kurentoEventsList.signaling.candidateSending, this.getRoomInfo());
             }
         });
         this.showLocalVideo();
+        this.setLocalVideoDisabled(this.localVideoDisabled);
+        this.setLocalAudioDisabled(this.localAudioDisabled);
 
         this.peerConnections[this.userId].on('iceStateChange', status => {
-            console.log('iceStateChange', status);
+            this.log('iceStateChange', status);
             switch (status) {
                 case 'connected': {
                     this.localPublished = true;
@@ -327,24 +407,24 @@ class KurentoAdapter {
                 }
                 case 'failed': {
                     this.localPublished = false;
-                    this.reconnectPublishTime = new Date().getTime();
                 }
-
             }
         });
-        this.peerConnections[this.userId].on('close', function () {
+        this.peerConnections[this.userId].on('close', () => {
+            this.log('peerConnectionClosedLocal', status);
             this.localPublished = false;
-            this.reconnectPublishTime = new Date().getTime();
         });
     };
 
     receiveRemoteVideo = (remoteUserId) => {
+        this.remoteUserInRoom = true;
+
         if (this.peerConnections[this.remoteUserId]) {
-            const oldPeerConnection = this.peerConnections[this.remoteUserId];
-
-            oldPeerConnection.destroy();
+            this.log('destroyingOldPeerConnectionRemote');
+            this.peerConnections[this.remoteUserId].destroy();
+            this.showRemoteVideo(true);
         }
-
+        this.log('createPeerConnectionRemote', remoteUserId);
         this.peerConnections[this.remoteUserId] = new Peer({
             initiator: true,
             trickle: true,
@@ -359,105 +439,112 @@ class KurentoAdapter {
         // ниже костыль, выпиливающий _onChannelClose , который зачем-то уничножает весь пир апри закрытии канала данных
         this.peerConnections[this.remoteUserId]._onChannelClose = () => null;
         // ---------------------------------------------------------------------
-        //this.peerConnections[this.remoteUserId]._debug = console.log;
-        this.peerConnections[this.remoteUserId].on('error', function (err) {
-            console.log('error', err)
+        // this.peerConnections[this.remoteUserId]._debug = console.log;
+        this.peerConnections[this.remoteUserId].on('error', error => {
+            this.log('errorPeerConnectionRemote', error, true);
         });
 
         this.peerConnections[this.remoteUserId].on('signal', data => {
             if (data?.type === 'offer') {
+                this.log('sendReceiveVideoFrom',{remoteUserId, data});
                 this.sendRequest('receiveVideoFrom', {
                     sender: remoteUserId,
                     sdpOffer: data.sdp
                 }, this.onRemoteVideoOfferSent.bind(null, remoteUserId));
-                this.eventEmitter.emit(kurentoEventsList.signaling.offerSending, this.getRoomInfo());
             }
             if (data?.candidate) {
                 const dataToSend = {...data.candidate};
                 dataToSend.endpointName = this.remoteUserId;
+                this.log('sendOnIceCandidateRemote',{remoteUserId, dataToSend});
                 this.sendRequest('onIceCandidate', dataToSend, this.onRemoteVideoCandidateSent.bind(null,remoteUserId));
-                this.eventEmitter.emit(kurentoEventsList.signaling.candidateSending, this.getRoomInfo());
             }
         });
         this.peerConnections[this.remoteUserId].on('stream', stream => {
-            this.showRemoteVideo(stream)
+            this.log('gotRemoteStream',stream);
+            this.remoteStream = stream;
+            this.showRemoteVideo();
         });
         this.peerConnections[this.remoteUserId].on('iceStateChange', status => {
+            this.log('iceStateChangeRemote', status);
             switch (status) {
                 case 'failed': {
                     this.remotePlaying = false;
-                    this.reconnectReceiveTime = new Date().getTime();
                 }
             }
         });
-        this.peerConnections[this.remoteUserId].on('close', function () {
+        this.peerConnections[this.remoteUserId].on('close', () => {
+            this.log('peerConnectionClosedRemote', status);
             this.remotePlaying = false;
-            this.reconnectReceiveTime = new Date().getTime();
         });
     }
-    connect = () => {
-        try {
-            this.sendRequest('joinRoom', {user: this.userId, room: this.roomId}, this.onRoomConnected)
-        } catch (e) {
-            setTimeout( this.connect, 1000);
-        }
-    };
 
     onIceCandidateReceived = candidate => {
+        this.log(`receivedIceCandidate${candidate.endpointName === this.userId ? 'Local' : 'Remote'}`, candidate);
         this.peerConnections[candidate.endpointName]?.signal({candidate});
     }
 
     onRoomConnected = (error, response) => {
         if (error) {
-            console.log('trying again', error, response);
-            setTimeout( this.connect, 1000);
-            this.eventEmitter.emit(kurentoEventsList.room.connectError, { ...this.getRoomInfo(), error })
+            this.log('errorJoiningToRoom',{error, response}, true);
+            setTimeout(this.connect, 1000);
         } else {
+            this.roomConnected = true;
+            this.log('joinedToRoom',response);
             this.processRemoteUsers(response.value);
             this.publishLocalVideo();
         }
     };
 
     onRemotePublished = user => {
-        console.log('new user', user);
+        this.log('onRemotePublished', user);
         this.processRemoteUsers([user]);
     };
 
-    onSocketConnected = error => {
-        console.log('connected', error);
+    onSocketConnected = () => {
+        this.log('signalServerConnected');
         this.connect();
-        this.roomConnected = true;
-        this.eventEmitter.emit(kurentoEventsList.room.connected, this.getRoomInfo())
     };
 
-    onSocketDisconnected = error => {
+    onSocketDisconnected = message => {
+        this.log('signalServerDisconnected', message);
         this.roomConnected = false;
-        this.reconnectRoomTime = new Date().getTime();
-        this.eventEmitter.emit(kurentoEventsList.room.disconnected, this.getRoomInfo())
+    };
+
+    onParticipantEvicted = message => {
+        this.log('onParticipantEvicted', message);
+        // this.roomConnected = false;
+        // this.eventEmitter.emit(kurentoEventsList.room.disconnected, this.getRoomInfo())
+    };
+
+    onParticipantJoined = message => {
+        this.log('onParticipantJoinend', message);
+    };
+
+    onParticipantLeft = userId => {
+        this.log('onParticipantEvicted', userId);
+        if (this.remoteUserIdKurento === userId) {
+            this.remoteUserInRoom = false;
+            this.showRemoteVideo(false);
+            this.remoteUserIdKurento = null;
+            this.peerConnections[this.remoteUserId].destroy();
+            this.remoteStream = null;
+        }
+        // this.roomConnected = false;
+        // this.eventEmitter.emit(kurentoEventsList.room.disconnected, this.getRoomInfo())
     };
 
     onSocketError = error => {
+        this.log('signalServerError', error, true);
         this.roomConnected = false;
-        this.reconnectRoomTime = false;
-        this.eventEmitter.emit(kurentoEventsList.room.reconnecting, this.getRoomInfo())
     };
-    //
-    // onSocketReconnected = error => {
-    //     console.log('onSocketReconnected ', error);
-    //     this.eventEmitter.emit(kurentoEventsList.room.reconnected, this.getRoomInfo())
-    // };
-
-    // onSocketReconnected = error => {
-    //     console.log('onSocketError ', error);
-    //     this.eventEmitter.emit(kurentoEventsList.room.reconnected, this.getRoomInfo())
-    // };
 
     getRoomInfo = () => {
-
+        return {
+            userId: this.userId, remoteUserId:this.remoteUserId, roomId: this.roomId
+        }
     };
-
     sendRequest = (method, params, callback) =>{
-        this.jsonRpcClient.send(method, params, callback);
+        this.jsonRPCClient.send(method, params, callback);
     };
 }
 
