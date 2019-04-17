@@ -18,12 +18,3 @@ const config = {
 };
 
 const kurento = new Kurento(config);
-
-//eventsEmitter.`` addEventListener(config.logEventName,
-
-config.localVideoParentElement.addEventListener('dblclick', kurento.closeLocalConnection);
-// config.remoteVideoParentElement.addEventListener('dblclick', kurento.peerConnections[config.remoteUserId].destroy);
-
-
-config.localVideoParentElement.addEventListener('click', kurento.setLocalVideoDisabled.bind(null,false));
-config.remoteVideoParentElement.addEventListener('click', kurento.setRemoteVideoDisabled.bind(null,false));

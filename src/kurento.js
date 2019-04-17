@@ -373,7 +373,9 @@ class KurentoAdapter {
             iceCompleteTimeout: 10000,
             offerOptions: {
                 offerToReceiveAudio: false,
-                offerToReceiveVideo: false
+                offerToReceiveVideo: false,
+                offerToSendAudio: true,
+                offerToSendVideo: !this.audioOnly
             }
         });
         // ниже костыль, выпиливающий _onChannelClose , который зачем-то уничножает весь пир апри закрытии канала данных
@@ -436,7 +438,9 @@ class KurentoAdapter {
             iceCompleteTimeout: 10000,
             offerOptions: {
                 offerToReceiveAudio: true,
-                offerToReceiveVideo: !this.audioOnly
+                offerToReceiveVideo: true,
+                offerToSendAudio: false,
+                offerToSendVideo: false
             },
             config: { iceServers: this.iceServers }
         });
