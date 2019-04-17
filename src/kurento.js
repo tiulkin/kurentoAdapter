@@ -65,6 +65,7 @@ class KurentoAdapter {
 
         this.localPublished = false;
         this.isClosing = false;
+        this.isReconnecting = false;
         this.remotePlaying = false;
 
         this.reconnectRoomTime = 0;
@@ -171,6 +172,7 @@ class KurentoAdapter {
     connect = () => {
         this.log('joiningToRoom');
         try {
+            this.isReconnecting = false;
             this.sendRequest('joinRoom', {user: this.userId, room: this.roomId}, this.onRoomConnected)
         } catch (e) {
             this.log('errorJoiningToRoom', e, true);
@@ -181,16 +183,18 @@ class KurentoAdapter {
     reconnectDeamon = () => {
         if (this.isClosing) {
             clearInterval(this.reconnectInterval);
-        } else if ((!this.roomConnected || !this.localPublished || (this.remoteUserInRoom && (!this.remotePlaying ))) &&
+        } else if (!this.isReconnecting &&
+            (!this.roomConnected || !this.localPublished || (this.remoteUserInRoom && !this.remotePlaying )) &&
             this.reconnectRoomTime + tryingTimeToError < new Date().getTime()) {
-                    this.log('resetRoomConnection', {
-                        roomConnected: this.roomConnected,
-                        localPublished: this.localPublished,
-                        remotePlaying: this.remotePlaying
-                    });
-                    this.reconnectRoomTime = new Date().getTime();
-                    this.start();
-                }
+                this.log('resetRoomConnection', {
+                    roomConnected: this.roomConnected,
+                    localPublished: this.localPublished,
+                    remotePlaying: this.remotePlaying
+                });
+                this.reconnectRoomTime = new Date().getTime();
+                this.isReconnecting = true;
+                this.start();
+            }
     };
 
     closeLocalConnection = () => {
@@ -488,6 +492,7 @@ class KurentoAdapter {
             this.log('errorJoiningToRoom',{error, response}, true);
             setTimeout(this.connect, 1000);
         } else {
+            this.isReconnecting = false;
             this.roomConnected = true;
             this.log('joinedToRoom',response);
             this.processRemoteUsers(response.value);
@@ -529,13 +534,12 @@ class KurentoAdapter {
             this.peerConnections[this.remoteUserId].destroy();
             this.remoteStream = null;
         }
-        // this.roomConnected = false;
-        // this.eventEmitter.emit(kurentoEventsList.room.disconnected, this.getRoomInfo())
     };
 
     onSocketError = error => {
         this.log('signalServerError', error, true);
         this.roomConnected = false;
+        this.isReconnecting = false;
     };
 
     getRoomInfo = () => {
