@@ -263,7 +263,7 @@ class KurentoAdapter {
             };
             audioElement.onplay = () => {
                 this.log('remoteAudioStarted');
-                audioElement.srcObject = null;
+                videoElement.srcObject = null;
                 this.remotePlaying = true;
             };
             audioElement.onerror = () => {
