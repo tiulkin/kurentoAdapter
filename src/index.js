@@ -4,7 +4,7 @@ import EventEmitter from 'events';
 
 //const eventsEmitter = new EventEmitter();
 const eventsEmitter = { emit: (event, data) => {
-    console.log(event, data);
+    //console.log(event, data);
 }};
 const config = {
     roomServerUrl: 'wss://kms.smart-university.ru/room',

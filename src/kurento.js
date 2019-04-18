@@ -17,7 +17,7 @@ const defaultConstraints = {
         }
     }
 };
-const tryingTimeToError = 3000;
+const tryingTimeToError = 5000;
 const defaultIceServers = [
     {
         "urls": ["turn:84.201.132.40:3478"],
@@ -76,8 +76,8 @@ class KurentoAdapter {
         // the first attempt for audio and video
 
     }
-    log = data => {
-        if (this.logEventName) this.emit(this.logEventName, data);
+    log = (event, data, isError) => {
+        if (this.logEventName) this.emit(this.logEventName, {event, data, isError});
     };
 
     emit = (event, data) => {
@@ -156,7 +156,7 @@ class KurentoAdapter {
                 onerror: this.onSocketError
             },
             rpc: {
-                requestTimeout: 2000,
+                requestTimeout: 60000,
                 participantPublished: this.onRemotePublished,
                 participantLeft: this.onParticipantLeft,
                 participantEvicted: this.onParticipantEvicted,
@@ -189,7 +189,8 @@ class KurentoAdapter {
                 this.log('resetRoomConnection', {
                     roomConnected: this.roomConnected,
                     localPublished: this.localPublished,
-                    remotePlaying: this.remotePlaying
+                    remotePlaying: this.remotePlaying,
+                    remoteUserInRoom: this.remoteUserInRoom
                 });
                 this.reconnectRoomTime = new Date().getTime();
                 this.isReconnecting = true;
@@ -350,15 +351,15 @@ class KurentoAdapter {
         }
     };
 
-    onLocalVideoCandidateSent = (remoteUserId, error, response) => {
+    onLocalVideoCandidateSent = (error, response) => {
         if(error) {
-            this.log('errorSendingLocalIceCandidate', {remoteUserId, error, response}, true);
+            this.log('errorSendingIceCandidateLocal', {error, response}, true);
         }
     };
 
     onRemoteVideoCandidateSent = (remoteUserId, error, response) => {
         if(error) {
-            this.log('errorSendingRemoteIceCandidate', {remoteUserId, error, response}, true);
+            this.log('errorSendingIceCandidateRemote', {error, response}, true);
         }
     };
 
@@ -466,7 +467,7 @@ class KurentoAdapter {
             }
         });
         this.peerConnections[this.remoteUserId].on('stream', stream => {
-            this.log('gotRemoteStream',stream);
+            this.log('gotRemoteStream');
             this.remoteStream = stream;
             this.showRemoteVideo();
         });
@@ -517,19 +518,26 @@ class KurentoAdapter {
         this.roomConnected = false;
     };
 
-    onParticipantEvicted = message => {
-        this.log('onParticipantEvicted', message);
-        // this.roomConnected = false;
-        // this.eventEmitter.emit(kurentoEventsList.room.disconnected, this.getRoomInfo())
+    onParticipantEvicted = data => {
+        this.log('onParticipantEvicted', data);
+        if (this.remoteUserIdKurento === data?.name) {
+            this.remoteUserInRoom = false;
+            this.showRemoteVideo(false);
+            this.remoteUserIdKurento = null;
+            this.peerConnections[this.remoteUserId].destroy();
+            this.remoteStream = null;
+        }
     };
 
     onParticipantJoined = message => {
         this.log('onParticipantJoinend', message);
     };
 
-    onParticipantLeft = userId => {
-        this.log('onParticipantEvicted', userId);
-        if (this.remoteUserIdKurento === userId) {
+    onParticipantLeft = data => {
+        this.log('onParticipantLeft', data);
+        console.log(this.remoteUserIdKurento);
+        if (this.remoteUserIdKurento === data?.name) {
+            this.log('reset remoteUserInRoom');
             this.remoteUserInRoom = false;
             this.showRemoteVideo(false);
             this.remoteUserIdKurento = null;
