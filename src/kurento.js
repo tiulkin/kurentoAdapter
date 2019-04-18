@@ -145,7 +145,7 @@ class KurentoAdapter {
 
     initJsonRPCClient = () => {
         const config = {
-            heartbeat: 2000,
+            // heartbeat: 2000,
             sendCloseMessage: false,
             ws: {
                 uri: this.roomServerUrl,
@@ -156,7 +156,7 @@ class KurentoAdapter {
                 onerror: this.onSocketError
             },
             rpc: {
-                requestTimeout: 60000,
+                // requestTimeout: 2000,
                 participantPublished: this.onRemotePublished,
                 participantLeft: this.onParticipantLeft,
                 participantEvicted: this.onParticipantEvicted,
