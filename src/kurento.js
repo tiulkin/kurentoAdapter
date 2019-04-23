@@ -51,7 +51,6 @@ class KurentoAdapter {
         this.roomId = config.roomId;
         this.userId = config.userId;
         this.remoteUserId = config.remoteUserId;
-        this.remoteUserIdKurento = config.remoteUserIdKurento;
 
         this.audioOnly = false;
 
@@ -60,17 +59,20 @@ class KurentoAdapter {
         this.remoteVideoDisabled = config.remoteVideoDisabled;
         this.remoteAudioDisabled = config.remoteAudioDisabled;
 
-        this.roomConnected = false;
-        this.remoteUserInRoom = false;
-
-        this.localPublished = false;
-        this.isClosing = false;
-        this.isReconnecting = false;
+        this.connectionState = {
+            signalServerState: null,
+            roomConnectionState: null,
+            localVideoState: null,
+            remoteVideoState: null,
+            remoteUserInRoom: false,
+            remoteVideoPlaying: false,
+            remoteUserInRoomId: null,
+            remoteUserInRoomStreamId: null
+        };
         this.remotePlaying = false;
 
-        this.reconnectRoomTime = 0;
-        this.reconnectRoomTime = 0;
-        this.reconnectInterval = null;
+        this.nextGeneralStateCheck  = 0;
+        this.nextStateCheck = {};
 
         this.start();
         // the first attempt for audio and video
@@ -87,26 +89,7 @@ class KurentoAdapter {
 
     start = () => {
         this.log('startingProcess');
-        if (this.jsonRPCClient) {
-            try {
-                this.log('closingExistedJsonRPCClient');
-                this.jsonRPCClient.close();
-            } catch (error) {
-                this.log('errorClosingExistedJsonRPCClient', error, true);
-            }
-        }
-        if (this.peerConnections[this.userId]) {
-            this.log('destroingExistedPeerConnectionLocal');
-            this.localStream = null;
-            this.peerConnections[this.userId].destroy();
-        }
-        if (this.peerConnections[this.remoteUserId]) {
-            this.log('destroingExistedPeerConnectionRemote');
-            this.remoteStream = null;
-            this.peerConnections[this.remoteUserId].destroy();
-        }
-        this.showRemoteVideo(true);
-        this.showLocalVideo(true);
+
         getUserMedia(this.rtcConstrains, (err, stream) => {
             this.log('getUserMediaWithVideo');
             if (err) {
@@ -131,21 +114,32 @@ class KurentoAdapter {
     }
 
     initConnection = stream => {
-        this.localStream =  stream;
+        if (this.connectionState.roomConnectionState === 'connecting') return;
+        this.changeStates({
+            signalServerState: 'connecting',
+            roomConnectionState: null
+        });
+        this.localStream =  stream || this.localStream;
         this.log('gotLocalStream');
         try {
             this.log('initJsonRPCClient');
+            if (this.jsonRPCClient) {
+                try {
+                    this.log('closingExistedJsonRPCClient');
+                    this.jsonRPCClient.close();
+                } catch (error) {
+                    this.log('errorClosingExistedJsonRPCClient', error, true);
+                }
+            }
             this.initJsonRPCClient();
         } catch (error) {
             this.log('initJsonRPCClientError', error, true);
         }
-        clearInterval(this.reconnectInterval);
-        setTimeout(() => this.reconnectInterval = setInterval(this.reconnectDeamon, 5000), 2000);
-    }
+    };
 
     initJsonRPCClient = () => {
         const config = {
-            // heartbeat: 2000,
+            heartbeat: 2000,
             sendCloseMessage: false,
             ws: {
                 uri: this.roomServerUrl,
@@ -156,7 +150,7 @@ class KurentoAdapter {
                 onerror: this.onSocketError
             },
             rpc: {
-                // requestTimeout: 2000,
+                requestTimeout: 2000,
                 participantPublished: this.onRemotePublished,
                 participantLeft: this.onParticipantLeft,
                 participantEvicted: this.onParticipantEvicted,
@@ -170,41 +164,52 @@ class KurentoAdapter {
     }
 
     connect = () => {
-        this.log('joiningToRoom');
+        if (this.connectionState.roomConnectionState === 'connecting') return;
+        this.log('roomConnectionState', 'connecting');
         try {
-            this.isReconnecting = false;
+            this.changeStates({roomConnectionState: 'connecting'});
             this.sendRequest('joinRoom', {user: this.userId, room: this.roomId}, this.onRoomConnected)
         } catch (e) {
+            this.changeStates({roomConnectionState: 'disconnected'});
             this.log('errorJoiningToRoom', e, true);
-            setTimeout(this.connect, 1000);
         }
     };
 
-    reconnectDeamon = () => {
-        if (this.isClosing) {
-            clearInterval(this.reconnectInterval);
-        } else if (!this.isReconnecting &&
-            (!this.roomConnected || !this.localPublished || (this.remoteUserInRoom && !this.remotePlaying )) &&
-            this.reconnectRoomTime + tryingTimeToError < new Date().getTime()) {
-                this.log('resetRoomConnection', {
-                    roomConnected: this.roomConnected,
-                    localPublished: this.localPublished,
-                    remotePlaying: this.remotePlaying,
-                    remoteUserInRoom: this.remoteUserInRoom
+    processStateChanges = () => {
+        // для упрощения реадлизации считаем, что блокирующие других проверки
+        // находятся в начале массива в порядке приоритета
+        console.log(this.connectionState);
+        let stopChecking = false;
+
+        this.stateMachine.forEach(condition => {
+                let passed = 0;
+                const logData = {};
+
+                if(stopChecking) return;
+                Object.keys(condition.states).forEach(state => {
+                    if (condition.states[state].includes(this.connectionState[state])) {
+                        logData[state] = this.connectionState[state];
+                        passed += 1;
+                    }
                 });
-                this.reconnectRoomTime = new Date().getTime();
-                this.isReconnecting = true;
-                this.start();
+                console.log(passed);
+                if (passed === Object.keys(condition.states).length) {
+                    this.log('stateMachine', {method: condition.startMethod, data: logData});
+                    setTimeout(this[condition.startMethod], condition.delay);
+                    if (condition.blocksOthers) {
+                        stopChecking = true;
+                    }
+                }
             }
+        )
     };
 
     closeLocalConnection = () => {
         this.log('closeLocalConnection');
-        this.isClosing = true;
         this.peerConnections[this.userId].destroy();
         this.peerConnections=null;
+    };
 
-    }
     showLocalVideo = destroyOnly => {
         const parentElement = typeof this.localVideoParentElement === 'string'
             ? document.getElementById(this.localVideoParentElement)
@@ -237,6 +242,7 @@ class KurentoAdapter {
             ? document.getElementById(this.remoteVideoParentElement)
             : this.remoteVideoParentElement;
 
+        this.changeStates({'remoteVideoPlaying': false});
         if (this.remoteStream && parentElement) {
             let audioElement = parentElement.getElementsByTagName('audio')[0];
             let videoElement = parentElement.getElementsByTagName('video')[0];
@@ -255,20 +261,20 @@ class KurentoAdapter {
 
             videoElement.onplay = () => {
                 // audioElement.srcObject = null;
-                this.remotePlaying = true;
+                this.changeStates({'remoteVideoPlaying': true});
                 this.log('remoteVideoStarted');
             };
             videoElement.onerror = () => {
                 this.log('remoteVideoError');
-                this.remotePlaying = false;
+                this.changeStates({'remoteVideoPlaying': false});
             };
             audioElement.onplay = () => {
                 this.log('remoteAudioStarted');
                 // videoElement.srcObject = null;
-                this.remotePlaying = true;
+                this.changeStates({'remoteVideoPlaying': true});
             };
             audioElement.onerror = () => {
-                this.remotePlaying = false;
+                this.changeStates({'remoteVideoPlaying': false});
                 this.log('remoteAudioError');
             };
             audioElement.srcObject = this.remoteStream;
@@ -308,20 +314,26 @@ class KurentoAdapter {
             this.log(value ? 'disabledRemoteAudio' : 'enabledRemoteAudio');
             track.enabled = !value;
         });
-    }
+    };
 
     processRemoteUsers = users => {
         const members = users || [];
-        let remoteUserId = null;
+        let remoteUserInRoomId = null;
+        let remoteUserInRoomStreamId = null;
 
         members.forEach (member => {
-            if ((member.id||'').includes(this.remoteUserId) && member.streams?.length)
-                remoteUserId = `${member.id}_${member.streams[member.streams.length-1].id}`;
+            if ((member.id||'').includes(this.remoteUserId) && member.streams?.length) {
+                remoteUserInRoomId = member.id;
+                remoteUserInRoomStreamId = member.streams[member.streams.length-1].id;
+            }
         });
 
-        if (remoteUserId){
-            this.remoteUserIdKurento = remoteUserId;
-            this.receiveRemoteVideo(remoteUserId);
+        if (remoteUserInRoomId) {
+            this.changeStates({
+                remoteUserInRoom: true,
+                remoteUserInRoomId,
+                remoteUserInRoomStreamId
+            });
         }
     };
 
@@ -365,6 +377,7 @@ class KurentoAdapter {
 
     publishLocalVideo = () => {
         this.log('createPeerConnectionLocal');
+        if(this.connectionState.localVideoState==='peerConnectionConnecting') return;
         this.peerConnections[this.userId] = new Peer({
             initiator: true,
             trickle: true,
@@ -379,6 +392,7 @@ class KurentoAdapter {
                 offerToSendVideo: !this.audioOnly
             }
         });
+        this.changeStates({localVideoState:'peerConnectionConnecting'});
         // ниже костыль, выпиливающий _onChannelClose , который зачем-то уничножает весь пир апри закрытии канала данных
         this.peerConnections[this.userId]._onChannelClose = () => null;
         // ---------------------------------------------------------------------
@@ -409,29 +423,38 @@ class KurentoAdapter {
             this.log('iceStateChange', status);
             switch (status) {
                 case 'connected': {
-                    this.localPublished = true;
+                    this.changeStates({localVideoState:'peerConnectionConnected'});
+                    break;
+                }
+                case 'disconnected': {
+                    this.changeStates({localVideoState:'peerConnectionDisconnected'});
                     break;
                 }
                 case 'failed': {
-                    this.localPublished = false;
+                    this.changeStates({localVideoState:'peerConnectionFailed'});
+                    break;
                 }
             }
         });
+
         this.peerConnections[this.userId].on('close', () => {
             this.log('peerConnectionClosedLocal', status);
-            this.localPublished = false;
+            this.changeStates({localVideoState:'peerConnectionDisconnected'});
         });
     };
 
-    receiveRemoteVideo = (remoteUserId) => {
-        this.remoteUserInRoom = true;
+    republishLocalVideo = () => this.initConnection;
 
+
+    receiveRemoteVideo = () => {
+        if (this.connectionState.remoteVideoState === 'peerConnectionConnecting') return;
+        this.changeStates({remoteVideoState :'peerConnectionConnecting'});
         if (this.peerConnections[this.remoteUserId]) {
             this.log('destroyingOldPeerConnectionRemote');
             this.peerConnections[this.remoteUserId].destroy();
             this.showRemoteVideo(true);
         }
-        this.log('createPeerConnectionRemote', remoteUserId);
+        this.log('createPeerConnectionRemote', this.connectionState.remoteUserInRoomId);
         this.peerConnections[this.remoteUserId] = new Peer({
             initiator: true,
             trickle: true,
@@ -453,53 +476,68 @@ class KurentoAdapter {
 
         this.peerConnections[this.remoteUserId].on('signal', data => {
             if (data?.type === 'offer') {
-                this.log('sendReceiveVideoFrom',{remoteUserId, data});
+                this.log('sendReceiveVideoFrom',{remoteUserId: this.connectionState.remoteUserInRoomId, data});
                 this.sendRequest('receiveVideoFrom', {
-                    sender: remoteUserId,
+                    sender: `${this.connectionState.remoteUserInRoomId}_${this.connectionState.remoteUserInRoomStreamId}`,
                     sdpOffer: data.sdp
-                }, this.onRemoteVideoOfferSent.bind(null, remoteUserId));
+                }, this.onRemoteVideoOfferSent.bind(null, this.connectionState.remoteUserInRoomId));
             }
             if (data?.candidate) {
                 const dataToSend = {...data.candidate};
                 dataToSend.endpointName = this.remoteUserId;
-                this.log('sendOnIceCandidateRemote',{remoteUserId, dataToSend});
-                this.sendRequest('onIceCandidate', dataToSend, this.onRemoteVideoCandidateSent.bind(null,remoteUserId));
+                this.log('sendOnIceCandidateRemote',{remoteUserId: this.connectionState.remoteUserInRoomId, dataToSend});
+                this.sendRequest('onIceCandidate', dataToSend, this.onRemoteVideoCandidateSent.bind(null, this.connectionState.remoteUserInRoomId));
             }
         });
+
         this.peerConnections[this.remoteUserId].on('stream', stream => {
             this.log('gotRemoteStream');
             this.remoteStream = stream;
             this.showRemoteVideo();
         });
+
         this.peerConnections[this.remoteUserId].on('iceStateChange', status => {
             this.log('iceStateChangeRemote', status);
             switch (status) {
-                case 'failed': {
-                    this.remotePlaying = false;
+                case 'connected': {
+                    this.changeStates({remoteVideoState:'peerConnectionConnected'});
+                    break;
+                }
+                case 'disconnected': {
+                    this.changeStates({remoteVideoState:'peerConnectionDisconnected'});
+                    break;
                 }
             }
         });
+
         this.peerConnections[this.remoteUserId].on('close', () => {
             this.log('peerConnectionClosedRemote', status);
-            this.remotePlaying = false;
+            this.changeStates({remoteVideoState:'peerConnectionFailed'});
         });
-    }
+    };
 
     onIceCandidateReceived = candidate => {
         this.log(`receivedIceCandidate${candidate.endpointName === this.userId ? 'Local' : 'Remote'}`, candidate);
         this.peerConnections[candidate.endpointName]?.signal({candidate});
-    }
+    };
 
     onRoomConnected = (error, response) => {
         if (error) {
+            this.changeStates({
+                roomConnectionState: 'disconnected',
+            });
             this.log('errorJoiningToRoom',{error, response}, true);
-            setTimeout(this.connect, 1000);
         } else {
-            this.isReconnecting = false;
-            this.roomConnected = true;
+            this.changeStates({
+                remoteUserInRoom: false,
+                roomConnectionState: 'connected',
+                remoteUserInRoomId: null,
+                remoteUserInRoomStreamId: null,
+                localVideoState: null,
+                remoteVideoState: null
+            });
             this.log('joinedToRoom',response);
             this.processRemoteUsers(response.value);
-            this.publishLocalVideo();
         }
     };
 
@@ -510,21 +548,24 @@ class KurentoAdapter {
 
     onSocketConnected = () => {
         this.log('signalServerConnected');
-        this.connect();
+        this.changeStates({signalServerState: 'connected' });
     };
 
     onSocketDisconnected = message => {
         this.log('signalServerDisconnected', message);
-        this.roomConnected = false;
+        this.changeStates({signalServerState: 'disconnected' });
     };
 
     onParticipantEvicted = data => {
         this.log('onParticipantEvicted', data);
-        if (this.remoteUserIdKurento === data?.name) {
-            this.remoteUserInRoom = false;
+        if (this.connectionState.remoteUserInRoomId === data?.name) {
+            this.changeStates({
+                remoteUserInRoom: false,
+                remoteUserInRoomId: null,
+                remoteUserInRoomStreamId: null
+            });
             this.showRemoteVideo(false);
-            this.remoteUserIdKurento = null;
-            this.peerConnections[this.remoteUserId].destroy();
+            this.peerConnections[this.remoteUserId]?.destroy();
             this.remoteStream = null;
         }
     };
@@ -534,22 +575,22 @@ class KurentoAdapter {
     };
 
     onParticipantLeft = data => {
-        this.log('onParticipantLeft', data);
-        console.log(this.remoteUserIdKurento);
-        if (this.remoteUserIdKurento === data?.name) {
-            this.log('reset remoteUserInRoom');
-            this.remoteUserInRoom = false;
-            this.showRemoteVideo(false);
-            this.remoteUserIdKurento = null;
-            this.peerConnections[this.remoteUserId].destroy();
+        this.log('onParticipantLeft', this.connectionState.remoteUserInRoomId, data);
+        if (this.connectionState.remoteUserInRoomId === data?.name) {
+            this.changeStates({
+                remoteUserInRoom: false,
+                remoteUserInRoomId: null,
+                remoteUserInRoomStreamId: null
+            });
+            this.showRemoteVideo(true);
+            this.peerConnections[this.remoteUserId]?.destroy();
             this.remoteStream = null;
         }
     };
 
     onSocketError = error => {
-        this.log('signalServerError', error, true);
-        this.roomConnected = false;
-        this.isReconnecting = false;
+        this.log('signalServerError', null, true);
+        this.changeStates({signalServerState: 'disconnected' });
     };
 
     getRoomInfo = () => {
@@ -557,9 +598,122 @@ class KurentoAdapter {
             userId: this.userId, remoteUserId:this.remoteUserId, roomId: this.roomId
         }
     };
+
     sendRequest = (method, params, callback) =>{
         this.jsonRPCClient.send(method, params, callback);
     };
+
+    changeStates = changes => {
+        this.connectionState = { ...this.connectionState, ...changes};
+        this.processStateChanges();
+    };
+
+    stateMachine = [
+        {
+            states: {
+                signalServerState: [null],
+                roomConnectionState: [null, 'connecting', 'connected', 'disconnected'],
+                localVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteUserInRoom: [true, false],
+                remoteVideoPlaying: [true, false]
+            },
+            startMethod: 'initConnection',
+            delay: 0,
+            blocksOthers: true,
+        },
+        {
+            states: {
+                signalServerState: ['disconnected'],
+                roomConnectionState: [null, 'connecting', 'connected', 'disconnected'],
+                localVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteUserInRoom: [true, false],
+                remoteVideoPlaying: [true, false]
+            },
+            startMethod: 'initConnection',
+            delay: 1000,
+            blocksOthers: true,
+        },
+        {
+            states: {
+                signalServerState: ['connected'],
+                roomConnectionState: [null],
+                localVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteUserInRoom: [true, false],
+                remoteVideoPlaying: [true, false]
+            },
+            startMethod: 'connect',
+            delay: 0,
+            blocksOthers: true,
+        },
+        {
+            states: {
+                signalServerState: ['connected'],
+                roomConnectionState: ['disconnected'],
+                localVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteUserInRoom: [true, false],
+                remoteVideoPlaying: [true, false]
+            },
+            startMethod: 'connect',
+            delay: 1000,
+            blocksOthers: true,
+        },
+        {
+            states: {
+                signalServerState: ['connected'],
+                roomConnectionState: ['connected'],
+                localVideoState: [null],
+                remoteVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteUserInRoom: [true, false],
+                remoteVideoPlaying: [true, false]
+            },
+            startMethod: 'publishLocalVideo',
+            delay: 0,
+            blocksOthers: false,
+        },
+        {
+            states: {
+                signalServerState: ['connected'],
+                roomConnectionState: ['connected'],
+                localVideoState: ['peerConnectionDisconnected', 'peerConnectionFailed'],
+                remoteVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteUserInRoom: [true, false],
+                remoteVideoPlaying: [true, false]
+            },
+            startMethod: 'republishLocalVideo',
+            delay: 1000,
+            blocksOthers: false,
+        },
+        {
+            states: {
+                signalServerState: ['connected'],
+                roomConnectionState: ['connected'],
+                localVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteVideoState: [null, 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteUserInRoom: [true],
+                remoteVideoPlaying: [true, false]
+            },
+            startMethod: 'receiveRemoteVideo',
+            delay: 0,
+            blocksOthers: false,
+        },
+        {
+            states: {
+                signalServerState: ['connected'],
+                roomConnectionState: ['connected'],
+                localVideoState: [null, 'peerConnectionConnecting', 'peerConnectionConnected', 'peerConnectionFailed', 'peerConnectionDisconnected'],
+                remoteVideoState: ['peerConnectionConnected'],
+                remoteUserInRoom: [true],
+                remoteVideoPlaying: [false]
+            },
+            startMethod: 'showRemoteVideo',
+            delay: 0,
+            blocksOthers: false,
+        }
+    ];
 }
 
 export default KurentoAdapter;

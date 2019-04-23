@@ -7,7 +7,9 @@ const eventsEmitter = { emit: (event, data) => {
     //console.log(event, data);
 }};
 const config = {
+//    roomServerUrl: 'wss://kms.smart-university.ru/room',
     roomServerUrl: 'wss://kms.smart-university.ru/room',
+//
     roomId: 'room1',
     userId: location.hash === '#1' ? 'user1' : 'user2',
     remoteUserId: location.hash !== '#1' ? 'user1' : 'user2',
